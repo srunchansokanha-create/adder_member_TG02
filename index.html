@@ -7,7 +7,8 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;}
-body{font-family:'JetBrains Mono',monospace;background:#0d0d1a;color:#fff;margin:0;}
+body{font-family:'JetBrains Mono',monospace;  background: linear-gradient(135deg,#203a43);
+color:#fff;width:100%;}
 .container{max-width:1000px;margin:auto;padding:15px;}
 section{background:linear-gradient(135deg,#047c8ec5,#036158fb);border-radius:20px;padding:20px;margin-bottom:20px;}
 .card-title{font-size:22px;font-weight:700;color:#00ff7f;text-align:center;margin-bottom:10px;}
@@ -213,6 +214,7 @@ thead, tbody tr{display:table;width:100%;table-layout:fixed;}
 <!-- ===== History & Accounts ===== -->
 <section id="historyPage" class="hidden">
   <div class="card-title">Accounts Status</div>
+  <button onclick="logout()">Logout</button>
   <div class="bar-buttons">
   <button id="btnAutoAddPage">Auto Add Members</button>
 </div>
@@ -389,16 +391,10 @@ startBtn.onclick = async () => {
   accIndex = 0
   list.innerHTML = ""
   consoleBox.innerHTML = ""
-
   loadingBarWrapper.classList.remove("hidden")
 
-  // ===== Detect Mode =====
-  let isGroupMode = false
-  if (sourceValue.includes("t.me/") && !sourceValue.includes("\n")) {
-    isGroupMode = true
-  }
+  let isGroupMode = sourceValue.includes("t.me/") && !sourceValue.includes("\n")
 
-  // ===== Helper: update summary counters =====
   function updateSummary(statusType) {
     if (statusType === "success") successCount++
     else if (statusType === "failed") failedCount++
@@ -416,8 +412,98 @@ startBtn.onclick = async () => {
     progress.style.width = (total % 100) + "%"
   }
 
+  let accounts = await getAccounts()
+
+  function getNextAccount() {
+    const keys = Object.keys(accounts)
+    const now = Date.now()
+
+    for (let i = 0; i < keys.length; i++) {
+      let idx = (accIndex + i) % keys.length
+      let acc = accounts[keys[idx]]
+      if (acc.status === "active" && (!acc.floodWaitUntil || acc.floodWaitUntil < now)) {
+        return { acc, index: idx }
+      }
+    }
+    return null
+  }
+
+  async function addWithRotation(member) {
+    const userKey = member.username || member.user_id
+    let added = false
+
+    while (!added) {
+      accounts = await getAccounts() // refresh accounts
+
+      let accObj = getNextAccount()
+
+      if (!accObj) {
+        // 🔹 All accounts flood → wait until earliest flood expires
+        let nextTimes = Object.values(accounts)
+          .filter(a => a.floodWaitUntil)
+          .map(a => a.floodWaitUntil)
+
+        let nextTime = nextTimes.length ? Math.min(...nextTimes) : Date.now() + 60000
+        let waitMs = nextTime - Date.now()
+        let timeStr = new Date(nextTime).toLocaleString('en-US', { hour12: true })
+
+        status.innerText = `⚠️ All accounts Flood wait, auto resume at ${timeStr}`
+        consoleBox.innerHTML += `<p style="color:red;">⚠️ All accounts Flood wait → ${timeStr}</p>`
+
+        // ✅ wait until first account available
+        await new Promise(r => setTimeout(r, waitMs))
+        continue // try again after wait
+      }
+
+      let acc = accObj.acc
+      accIndex = accObj.index
+
+      status.innerText = `Adding: ${userKey}`
+      log(`🔹 Using ${acc.phone || acc.id} → ${userKey}`, userKey, "cyan")
+
+      try {
+        const res = await fetch("/add-member", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(member)
+        })
+
+        const result = await res.json()
+
+        if (result.status === "success") {
+          log(`${userKey} → SUCCESS`, userKey, "lime")
+          processResult("success")
+          await countdown(20, "Next account delay")
+          accIndex = (accIndex + 1) % Object.keys(accounts).length
+          added = true
+        } else if (result.reason && result.reason.toLowerCase().includes("flood")) {
+          let match = result.reason.match(/(\d+)/)
+          let waitSec = match ? Number(match[1]) : 60
+          acc.floodWaitUntil = Date.now() + waitSec * 1000
+          acc.status = "floodwait"
+
+          let timeStr = new Date(acc.floodWaitUntil).toLocaleString('en-US', { hour12: true })
+          log(`⚠️ ${acc.phone || acc.id} Flood → ${timeStr}`, userKey, "orange")
+
+          accIndex = (accIndex + 1) % Object.keys(accounts).length
+        } else {
+          log(`${userKey} → FAILED`, userKey, "red")
+          processResult("failed")
+          accIndex = (accIndex + 1) % Object.keys(accounts).length
+          added = true
+        }
+
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, userKey, "red")
+        processResult("failed")
+        accIndex = (accIndex + 1) % Object.keys(accounts).length
+        added = true
+      }
+    }
+  }
+
   // ===============================
-  // 🔹 MODE 1: GROUP (EXPORT MEMBERS)
+  // GROUP MODE
   // ===============================
   if (isGroupMode) {
     status.innerText = "Joining source group..."
@@ -433,122 +519,45 @@ startBtn.onclick = async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ group: sourceValue, offset, limit: 50 })
       })
-
       const data = await res.json()
-      if (data.error) { alert(data.error); break }
+      if (data.error) break
 
       const members = data.members || []
-      if (members.length === 0) break
-
+      if (!members.length) break
       offset = data.nextOffset
-      const accounts = await getAccounts()
 
       for (const m of members) {
         const userKey = m.user_id || m.username
-
         if (historySet.has(userKey)) {
-          log(`⏭️ Skipped ${m.username || m.user_id}`, userKey, "orange")
+          log(`⏭️ Skipped ${userKey}`, userKey, "orange")
           processResult("skipped")
           continue
         }
-
-        let acc = nextAccount(accounts, accIndex)
-        while (!acc) {
-          status.innerText = "Waiting for accounts..."
-          await countdown(5, "Waiting account")
-          const accountsUpdated = await getAccounts()
-          acc = nextAccount(accountsUpdated, 0)
-        }
-        accIndex = acc.index
-
-        status.innerText = `Adding: ${m.username || m.user_id}`
-        log(`🔹 Using ${acc.id} → ${m.username || m.user_id}`, userKey, "dark")
-
-        try {
-          const addRes = await fetch("/add-member", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              username: m.username,
-              user_id: m.user_id,
-              access_hash: m.access_hash,
-              targetGroup: target
-            })
-          })
-
-          const result = await addRes.json()
-          const color = result.status === "success" ? "lime" :
-                        result.status === "failed" ? "red" : "orange"
-
-          log(`${m.username || m.user_id} → ${result.status}`, userKey, color)
-          processResult(result.status)
-
-          if (result.status === "success") await countdown(20, "Delay")
-        } catch (err) {
-          log(`❌ Error: ${err.message}`, userKey, "red")
-          processResult("failed")
-        }
+        await addWithRotation({
+          username: m.username,
+          user_id: m.user_id,
+          access_hash: m.access_hash,
+          targetGroup: target
+        })
       }
     }
   }
 
   // ===============================
-  // 🔹 MODE 2: TEXTAREA (@USERNAME)
+  // TEXT MODE
   // ===============================
   else {
     status.innerText = "Joining target group..."
     await autoJoinAllAccounts(target)
-
-    const userList = sourceValue
-      .split("\n")
-      .map(u => u.trim())
-      .filter(u => u)
-
-    const accounts = await getAccounts()
+    const userList = sourceValue.split("\n").map(u => u.trim()).filter(u => u)
 
     for (const u of userList) {
-      const userKey = u
-
-      if (historySet.has(userKey)) {
-        log(`⏭️ Skipped ${u}`, userKey, "orange")
+      if (historySet.has(u)) {
+        log(`⏭️ Skipped ${u}`, u, "orange")
         processResult("skipped")
         continue
       }
-
-      let acc = nextAccount(accounts, accIndex)
-      while (!acc) {
-        status.innerText = "Waiting for accounts..."
-        await countdown(5, "Waiting account")
-        const accountsUpdated = await getAccounts()
-        acc = nextAccount(accountsUpdated, 0)
-      }
-      accIndex = acc.index
-
-      status.innerText = `Adding: ${u}`
-      log(`🔹 Using ${acc.id} → ${u}`, userKey, "cyan")
-
-      try {
-        const addRes = await fetch("/add-member", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: u,
-            targetGroup: target
-          })
-        })
-
-        const result = await addRes.json()
-        const color = result.status === "success" ? "lime" :
-                      result.status === "failed" ? "red" : "orange"
-
-        log(`${u} → ${result.status}`, userKey, color)
-        processResult(result.status)
-
-        if (result.status === "success") await countdown(20, "Delay")
-      } catch (err) {
-        log(`❌ Error: ${err.message}`, userKey, "red")
-        processResult("failed")
-      }
+      await addWithRotation({ username: u, targetGroup: target })
     }
   }
 
@@ -562,6 +571,7 @@ async function countdown(seconds, message) {
     await new Promise(r => setTimeout(r, 1000))
   }
 }
+
 
 </script>
 </div>
