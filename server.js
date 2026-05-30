@@ -12,21 +12,34 @@ app.use(express.json())
 
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)) }
 
-// ===== FIREBASE (ONLY HISTORY) =====
+// ================= FIREBASE (HISTORY ONLY SAFE MODE) =================
+let db = null
+
 const firebaseConfig = {
-  apiKey: process.env.FIREBASE_API_KEY,
-  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-  databaseURL: process.env.FIREBASE_DB_URL
+  apiKey: process.env.FIREBASE_API_KEY || "",
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || "",
+  databaseURL: process.env.FIREBASE_DB_URL || ""
 }
 
-initializeApp(firebaseConfig)
-const db = getDatabase()
+try {
+  if (firebaseConfig.databaseURL) {
+    initializeApp(firebaseConfig)
+    db = getDatabase()
+    console.log("🔥 Firebase enabled (history only)")
+  } else {
+    console.log("⚠️ Firebase disabled")
+  }
+} catch (e) {
+  console.log("⚠️ Firebase init failed:", e.message)
+  db = null
+}
 
-// ================= ACCOUNTS FROM RENDER ENV ONLY =================
+// ================= ACCOUNTS (FROM RENDER ENV ONLY) =================
 const accounts = []
 
 let i = 1
 while(process.env[`TG_ACCOUNT_${i}_PHONE`]){
+
   const api_id = Number(process.env[`TG_ACCOUNT_${i}_API_ID`])
   const api_hash = process.env[`TG_ACCOUNT_${i}_API_HASH`]
   const session = process.env[`TG_ACCOUNT_${i}_SESSION`]
@@ -51,7 +64,7 @@ while(process.env[`TG_ACCOUNT_${i}_PHONE`]){
   i++
 }
 
-// ================= PICK ACCOUNT (ROUND ROBIN + SAFE) =================
+// ================= ACCOUNT PICKER =================
 function getAvailableAccount(){
   const now = Date.now()
 
@@ -70,8 +83,16 @@ function getAvailableAccount(){
   return acc
 }
 
-// ================= TELEGRAM CLIENT (NO CACHE = SAVE RAM) =================
+// ================= FLOOD PARSER =================
+function parseFlood(err){
+  const msg = err.message || ""
+  const m = msg.match(/FLOOD_WAIT_(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
+// ================= TELEGRAM CLIENT (NO CACHE = LOW RAM) =================
 async function getClient(account){
+
   const client = new TelegramClient(
     new StringSession(account.session),
     account.api_id,
@@ -90,8 +111,10 @@ async function getClient(account){
   }catch(err){
 
     const wait = parseFlood(err)
+
     if(wait){
       account.floodWaitUntil = Date.now() + wait * 1000
+      account.status = "floodwait"
     }else{
       account.status = "error"
     }
@@ -101,13 +124,30 @@ async function getClient(account){
   }
 }
 
-// ================= FLOOD PARSE =================
-function parseFlood(err){
-  const msg = err.message || ""
-  const m = msg.match(/FLOOD_WAIT_(\d+)/)
-  if(m) return Number(m[1])
-  return null
-}
+// ================= ACCOUNT STATUS API (FIX 404) =================
+app.get('/account-status', (req, res) => {
+  const safe = accounts.map(a => ({
+    id: a.id,
+    phone: a.phone,
+    status: a.status,
+    floodWaitUntil: a.floodWaitUntil,
+    lastUsed: a.lastUsed
+  }))
+
+  res.json(safe)
+})
+
+// ================= HISTORY =================
+app.get('/history', async(req,res)=>{
+  try{
+    if(!db) return res.json({})
+
+    const snap = await get(ref(db,'history'))
+    res.json(snap.val() || {})
+  }catch(e){
+    res.json({})
+  }
+})
 
 // ================= ADD MEMBER =================
 app.post('/add-member', async (req,res)=>{
@@ -155,43 +195,35 @@ app.post('/add-member', async (req,res)=>{
     }catch(err){
 
       const wait = parseFlood(err)
+
       if(wait){
         acc.floodWaitUntil = Date.now() + wait * 1000
-        await client.disconnect()
-
-        return res.json({
-          status:"floodwait",
-          reason:`${wait}s`
-        })
+        acc.status = "floodwait"
       }
 
       await client.disconnect()
-      return res.json({status:"failed", reason:err.message})
+      return res.json({status:"failed", reason: err.message})
     }
 
     await sleep(4000)
     await client.disconnect()
 
-    // ================= HISTORY ONLY =================
-    await push(ref(db,'history'),{
-      username: username || user_id,
-      user_id,
-      status:"success",
-      accountUsed: acc.phone,
-      timestamp: Date.now()
-    })
+    // ================= HISTORY SAFE =================
+    if(db){
+      await push(ref(db,'history'),{
+        username: username || user_id,
+        user_id,
+        status:"success",
+        accountUsed: acc.phone,
+        timestamp: Date.now()
+      })
+    }
 
     return res.json({status:"success"})
 
   }catch(err){
     return res.json({status:"failed", reason:err.message})
   }
-})
-
-// ================= HISTORY =================
-app.get('/history', async(req,res)=>{
-  const snap = await get(ref(db,'history'))
-  res.json(snap.val() || {})
 })
 
 // ================= FRONTEND =================
@@ -201,5 +233,6 @@ const __dirname = path.dirname(__filename)
 app.use(express.static(__dirname))
 app.get('/', (req,res)=>res.sendFile(path.join(__dirname,'index.html')))
 
+// ================= START SERVER =================
 const PORT = process.env.PORT || 3000
 app.listen(PORT, ()=>console.log(`🚀 RUN ${PORT}`))
