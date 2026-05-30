@@ -1,21 +1,21 @@
 import 'dotenv/config'
 import express from 'express'
-import { TelegramClient } from 'telegram'
-import { StringSession } from 'telegram/sessions/index.js'
-import { initializeApp } from 'firebase/app'
-import { getDatabase, ref, push, get } from 'firebase/database'
 import path from 'path'
 import { fileURLToPath } from 'url'
+
+import { initializeApp } from 'firebase/app'
+import { getDatabase, ref, push, get } from 'firebase/database'
+
+import { TelegramClient } from 'telegram'
+import { StringSession } from 'telegram/sessions/index.js'
 
 const app = express()
 app.use(express.json())
 
 // ================= HELPERS =================
-function sleep(ms){
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
-function parseFlood(err){
+const parseFlood = (err) => {
   const msg = err?.message || ""
   const match = msg.match(/FLOOD_WAIT_(\d+)/)
   return match ? Number(match[1]) : null
@@ -38,7 +38,7 @@ initializeApp({
 
 const db = getDatabase()
 
-// ================= LOAD ACCOUNTS =================
+// ================= ACCOUNTS =================
 const accounts = []
 
 let i = 1
@@ -50,13 +50,13 @@ while(process.env[`TG_ACCOUNT_${i}_PHONE`]){
 
   if(api_id && api_hash && session){
     accounts.push({
-      id: `TG_ACCOUNT_${i}`,
+      id: `ACC_${i}`,
       phone,
       api_id,
       api_hash,
       session,
       status: "active",
-      floodWaitUntil: 0,
+      floodUntil: 0,
       lastUsed: 0
     })
   }
@@ -64,31 +64,31 @@ while(process.env[`TG_ACCOUNT_${i}_PHONE`]){
   i++
 }
 
-// ================= ACCOUNT PICKER =================
-function getAvailableAccount(){
+// ================= PICK ACCOUNT =================
+function getAccount(){
   const now = Date.now()
 
   const valid = accounts.filter(a =>
     a.status === "active" &&
-    (!a.floodWaitUntil || a.floodWaitUntil < now)
+    a.floodUntil < now
   )
 
   if(!valid.length) return null
 
-  valid.sort((a,b) => a.lastUsed - b.lastUsed)
+  valid.sort((a,b)=>a.lastUsed - b.lastUsed)
 
   const acc = valid[0]
-  acc.lastUsed = Date.now()
+  acc.lastUsed = now
 
   return acc
 }
 
 // ================= TELEGRAM CLIENT =================
-async function getClient(account){
+async function getClient(acc){
   const client = new TelegramClient(
-    new StringSession(account.session),
-    account.api_id,
-    account.api_hash,
+    new StringSession(acc.session),
+    acc.api_id,
+    acc.api_hash,
     {
       connectionRetries: 2,
       autoReconnect: false
@@ -100,12 +100,12 @@ async function getClient(account){
     await client.getMe()
     return client
   }catch(err){
-    const wait = parseFlood(err)
 
+    const wait = parseFlood(err)
     if(wait){
-      account.floodWaitUntil = Date.now() + wait * 1000
+      acc.floodUntil = Date.now() + wait * 1000
     }else{
-      account.status = "error"
+      acc.status = "error"
     }
 
     try{ await client.disconnect() }catch{}
@@ -115,28 +115,35 @@ async function getClient(account){
 
 // ================= ROUTES =================
 
-// HISTORY
-app.get('/history', async(req,res)=>{
-  const snap = await get(ref(db,'history'))
-  res.json(snap.val() || {})
+// HOME
+app.get('/', (req,res)=>{
+  res.send("Telegram Server Running 🚀")
 })
+
+// ACCOUNT STATUS (FIX 304 UI)
 app.get('/account-status', (req,res)=>{
-  const data = accounts.map(a => ({
+  res.set('Cache-Control','no-store')
+
+  res.json(accounts.map(a=>({
     id: a.id,
     phone: a.phone,
     status: a.status,
-    floodWaitUntil: a.floodWaitUntil
-      ? new Date(a.floodWaitUntil).toISOString()
-      : null,
+    floodUntil: a.floodUntil,
     lastUsed: a.lastUsed
-  }))
-
-  res.json(data)
+  })))
 })
-// SIMPLE TEST ROUTE (SAFE)
+
+// HISTORY
+app.get('/history', async(req,res)=>{
+  const snap = await get(ref(db,'history'))
+  res.set('Cache-Control','no-store')
+  res.json(snap.val() || {})
+})
+
+// TEST MESSAGE
 app.post('/send-test', async(req,res)=>{
   try{
-    const acc = getAvailableAccount()
+    const acc = getAccount()
     if(!acc) return res.json({status:"failed", reason:"No account"})
 
     const client = await getClient(acc)
@@ -154,15 +161,20 @@ app.post('/send-test', async(req,res)=>{
   }
 })
 
+// PLACEHOLDER (FIX 404 ISSUE)
+app.post('/add-member', (req,res)=>{
+  return res.json({
+    status: "disabled",
+    message: "This endpoint is not enabled in this build"
+  })
+})
+
 // ================= FRONTEND =================
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 app.use(express.static(__dirname))
-app.get('/', (req,res)=>{
-  res.sendFile(path.join(__dirname,'index.html'))
-})
 
-// ================= START SERVER =================
-const PORT = process.env.PORT || 3000
-app.listen(PORT, ()=>console.log(`🚀 RUN ${PORT}`))
+app.listen(process.env.PORT || 3000, ()=>{
+  console.log("🚀 RUN SERVER")
+})
