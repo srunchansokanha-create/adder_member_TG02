@@ -120,7 +120,19 @@ app.get('/history', async(req,res)=>{
   const snap = await get(ref(db,'history'))
   res.json(snap.val() || {})
 })
+app.get('/account-status', (req,res)=>{
+  const data = accounts.map(a => ({
+    id: a.id,
+    phone: a.phone,
+    status: a.status,
+    floodWaitUntil: a.floodWaitUntil
+      ? new Date(a.floodWaitUntil).toISOString()
+      : null,
+    lastUsed: a.lastUsed
+  }))
 
+  res.json(data)
+})
 // SIMPLE TEST ROUTE (SAFE)
 app.post('/send-test', async(req,res)=>{
   try{
